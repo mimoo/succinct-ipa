@@ -398,6 +398,34 @@ over `F_q`. Either non-native `F_q` arithmetic inside the `F_p` GKR (tens-of-× 
 blowup, simplest) or a linked `F_q`-sumcheck + `F_p`-GKR pair via bit-decomposition claims.
 Engineering, not a conceptual barrier; where a paper would spend its pages.
 
+## Entry 16 — Genesis runs end-to-end on Pallas (`sage/3-genesis-e2e.sage`)
+
+Everything implemented, no oracle stand-ins: the verifier **never touches the n generators**.
+The delegated circuit spans the entire pipeline, certified layer-by-layer by a hand-rolled
+GKR (layered sumcheck with eq-wiring, multi-claim kernels, split/transfer steps):
+
+- **derivation**: toy algebraic hash (x^5 rounds) → 4-candidate window → in-circuit Legendre
+  symbols (fixed exponentiation chains) → first-QR selection → **constant-time 31-iteration
+  Tonelli–Shanks sqrt in-circuit** (both Pasta fields are 2-adic; the ±1-test bits are linear
+  gadgets, validated natively first);
+- **fold**: k rounds of the IPA generator fold via **complete Renes–Costello–Batina point
+  addition** (a=0, b3=15; complete ⇒ one formula covers add/double/identity) with
+  double-and-add over **public challenge bits** — Pasta dissolves the two-field problem
+  because each fold layer's scalar is a single public constant;
+- **input check**: the circuit input is (seed, challenges) — the verifier's terminal MLE
+  evaluation is the closed form `seed + Σ pt_t·2^(nv−1−t)`, O(log n). The Genesis endpoint.
+
+Results (k=2/3, Pallas, single-thread Sage): ~1700–2200 layers; prover 0.6–1.3s; verifier
+0.2–0.3s ≈ 230k field ops, **λ·log n–dominated, flat in n**; proof ≈ 26–40k Fp elements.
+Honest run accepts; four tamper tests reject (off-curve Q, on-curve-but-wrong Q, corrupted
+certificate polynomial, wrong evaluation value). One engine bug found and fixed en route:
+`eq_array` built kernels with reversed variable order — invisible at nv≤1, caught by the
+prover-side invariant assert at the first nv=2 kernel and a minimal reproduction.
+
+Demo-grade caveats stay caveats: toy hash (not Poseidon), Legendre-window hash-to-curve
+(production: iso-SWU), λ=255 exponent grind dominates constants, un-optimized single-thread
+GKR. The architecture is the point: **setup = a seed; the generators never leave the prover.**
+
 ## Open threads / next
 
 1. **Self-eliminating accumulation (full IVC / cycle of curves).** Recurse the single
