@@ -24,3 +24,4 @@ import SuccinctIPA.LowerBound
 import SuccinctIPA.Scheme
 import SuccinctIPA.Nova
 import SuccinctIPA.Delegation
+import SuccinctIPA.Genesis

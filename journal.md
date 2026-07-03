@@ -324,7 +324,10 @@ verifier O(1) group ops. Prime-order, transparent, Pedersen-only — no pairing,
 order. This is the light-prover scheme the objection asks for: recursion cost paid in *native
 field/group ops*, proving paid **once**.
 
-## Entry 14 — The divide-and-conquer unlock: delegation + preprocessing (`Delegation.lean`)
+## Entry 14 — **Atlas**: the divide-and-conquer unlock — delegation + preprocessing (`Delegation.lean`)
+
+> **Named construction: Atlas** — the verifier consults a giant precomputed map (the
+> Kedlaya–Umans table). Full spec: `solutions/1-atlas.md`.
 
 User intuition: "there must be a divide-and-conquer algorithm somewhere." There is — and it
 came with **two tools we had never reached for**, because both live outside the
@@ -357,6 +360,44 @@ setup rises from `Θ(n)` to `n^{1+ε}` one-time public work. But as an *asymptot
 composition does it, and the divide-and-conquer intuition was exactly right: the missing move
 was delegating the D&C tree information-theoretically and bottoming out in preprocessing.
 
+## Entry 15 — **Genesis**: de-galacticizing — the SRS is a program, not a table (`Genesis.lean`)
+
+> **Named construction: Genesis** — the generators are grown from a seed *inside* the
+> delegated circuit. Full spec: `solutions/2-genesis.md`. Gate-level correctness verified in
+> `SuccinctIPA/Genesis.lean`: `genesis_reduction` (certifying the seed-composed computation
+> certifies the SRS claim), `double_and_add_step` (scalar-mult layer),
+> `square_and_multiply_step` (exponent-chain layer), `sqrt_exp_correct` (the deterministic
+> in-circuit square root is correct, via Euler's criterion).
+
+The galactic constants in Entry 14 come only from Kedlaya–Umans, and KU was only needed
+because the delegated circuit's *input* contained the `n`-sized generator table. But the table
+is not incompressible data — we generated it: `G_i = HashToCurve(seed, i)`. Fix:
+
+> **Feed the circuit the seed, not the generators; derive the SRS inside the delegated
+> circuit.** Input shrinks to `O(log n)` (seed + challenges); the final input-MLE check —
+> the only reason KU existed — becomes trivial. KU deleted, galactic constants gone.
+
+Everything in-circuit is deterministic, uniform, shallow: Poseidon-style algebraic
+hash-to-curve (GKR-friendly), sqrt as a fixed exponentiation `a^((p+1)/4)` (depth `O(λ)`,
+**no nondeterministic advice** — advice would be `n`-sized input and reintroduce the
+circularity), double-and-add + addition tree (depth `O(λ + log n)`).
+
+Why this doesn't contradict `no_lossy_digest_verifier`: the bound bites verifiers that *view*
+`G` through sublinear info, and truly random generators are incompressible. But binding only
+needs *pseudorandom* generators (the standard BP assumption), which have `O(1)` description —
+and the verifier never views them; it verifies the program that computes them. "SRS = data"
+was the mistake; "SRS = program" is the unlock.
+
+Resulting costs: setup = publish a seed; verifier polylog with small concrete constants;
+proof = Virgo/Libra-style polylog field elements (~tens of KB); prover = linear,
+`~n·O(λ)` GKR gates at a few field ops each, no commitments/FFTs — est. 100–1000× the raw
+MSM. Zk-prover-grade, not galactic.
+
+Remaining design problem (honest): the two-field issue — curve ops over `F_p`, tensor/scalars
+over `F_q`. Either non-native `F_q` arithmetic inside the `F_p` GKR (tens-of-× constant
+blowup, simplest) or a linked `F_q`-sumcheck + `F_p`-GKR pair via bit-decomposition claims.
+Engineering, not a conceptual barrier; where a paper would spend its pages.
+
 ## Open threads / next
 
 1. **Self-eliminating accumulation (full IVC / cycle of curves).** Recurse the single
@@ -386,6 +427,13 @@ was delegating the D&C tree information-theoretically and bottoming out in prepr
 | `MSMClaim.fold_valid/_sound` | Accumulation | Halo fold complete + sound |
 | `msm_product_split` | Hyrax | rank-1 ⇒ √n outer MSM |
 | `sCoeff_factors` | Hyrax | IPA s-vector is rank-1 over any split |
+| `sum_split` / `msm_split` | Delegation | the sumcheck D&C halving step (Atlas/Genesis) |
+| `sumcheck_round_complete` | Delegation | round-check completeness |
+| `disagreement_is_root`, `cheating_caught` | Delegation | round soundness (1-var Schwartz–Zippel) |
+| `genesis_reduction` | Genesis | seed-composed certificate ⇒ SRS claim |
+| `double_and_add_step` | Genesis | scalar-mult circuit layer |
+| `square_and_multiply_step` | Genesis | exponent-chain circuit layer |
+| `sqrt_exp_correct` | Genesis | deterministic in-circuit sqrt is correct |
 | `dark_eval_check` | DARK | O(1) verifier, unknown order |
 | `dark_witness_rigid` | DARK | unknown order pins the witness |
 | `msm_eq_dlog_inner` | DlogLayer | MSM = hidden inner product |
