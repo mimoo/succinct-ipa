@@ -23,7 +23,7 @@ $$s_i = \prod_{j=1}^{k} x_j^{\pm 1} \qquad (\text{sign determined by bit } j \te
 
 The two folded quantities behave very differently:
 
-- $b_0 = \langle \mathbf{s}, (z^i)_i \rangle$ — **already succinct**: $\mathbf{s}$ is the coefficient vector of $g(X) = \prod_{j=1}^{k} \big(x_j^{-1} + x_j X^{2^{j-1}}\big)$, so
+- $`b_0 = \langle \mathbf{s}, (z^i)_i \rangle`$ — **already succinct**: $\mathbf{s}$ is the coefficient vector of $`g(X) = \prod_{j=1}^{k} \big(x_j^{-1} + x_j X^{2^{j-1}}\big)`$, so
 
   $$b_0 = g(z) = \prod_{j=1}^{k} \big(x_j^{-1} + x_j z^{2^{j-1}}\big)$$
 
