@@ -474,6 +474,43 @@ naive MSM (2.44s vs 1.79s, 1.4×).** Genesis verify grows ~log n (λ-dominated: 
 1.79s while n grows 32×); the naive verifier grows linearly (~4.8 ms/term). Goal met on
 both baselines, with formally verified circuits (clean) pinned to the Sage implementation.
 
+## Entry 18 — Production derivation: Poseidon + iso-SWU (`sage/4-genesis-prod.sage`)
+
+Upgrades from the review of Entry 16/17's honest gaps:
+
+1. **clean sources moved into our repo** (`clean-circuits/`: `Genesis.lean`,
+   `GenesisCheck.lean`, `build.sh`, README) — symlinked into the gitignorable `clean-repo/`
+   checkout for building; pushable.
+2. **Toy hash → Poseidon**: t=3, α=5, 8 full + 56 partial rounds over the Pallas base
+   field; SHA-derived round constants, Cauchy MDS (invertible; swapping in official
+   Grain-generated pasta parameters is mechanical). One deg-5 circuit layer per round —
+   64 layers, 3 state columns per lane.
+3. **Legendre-window hack → RFC-9380-style iso-SWU**: simplified SWU on the 3-isogenous
+   curve (found by Sage at load: `E.isogenies_prime_degree(3)`, A·B ≠ 0), SWU constant
+   Z = −5 computed by the RFC criteria, in-circuit inversion via a `x^(p−2)` chain, and the
+   dual 3-isogeny back to Pallas evaluated **projectively** (no inversions). **No candidate
+   windows, no seed retries** — SWU guarantees one of gx1/gx2 is square, killing Entry 17's
+   `(1−2^−C)^n` setup-probability problem structurally. Exceptional inputs (probability
+   ~2^−250) checked at setup. Single-u encode_to_curve (NU variant); sgn0 canonicalization
+   skipped (deterministic + consistent, noted).
+4. **clean gadgets extended**: `PoseidonRound.circuitFull/-Partial` and `CurveEval`
+   (g(x) = x³+Ax+B given a verified square) — soundness + completeness proven, first
+   build; 8 `#eval` vectors now pin Lean ↔ Sage (all assert in `clean_vectors_check`).
+
+**Production benchmark** (Poseidon + iso-SWU pipeline, Pallas):
+
+| n | prover | Genesis verify | naive linear (Sage) | speedup |
+|---|---|---|---|---|
+| 64 | 11.6s | 0.67s | 0.37s | 0.6× |
+| 256 | 46.1s | 1.11s | 1.31s | 1.2× |
+| 512 | 111.5s | 1.79s | **3.93s** | **2.2×** |
+
+| **2048** | 423.6s | **1.72s** | **10.18s** | **5.9×** |
+
+Same crossover shape as the toy pipeline (win from n ≈ 256), now with a production-shaped
+derivation — and at n=2048 the production verifier (1.72s) also beats the backend-parity
+py-int naive MSM (2.46s, 1.4×), with all 8 Lean-verified vectors pinning the circuits.
+
 ## Open threads / next
 
 1. **Self-eliminating accumulation (full IVC / cycle of curves).** Recurse the single

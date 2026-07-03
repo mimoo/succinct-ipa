@@ -72,6 +72,32 @@ def rcbSpec (b3 x1 y1 z1 x2 y2 z2 : R) : R × R × R :=
   let z3 := zz * t4 + t0'3 * t3
   (x3, y3, z3)
 
+
+/-- One Poseidon full round (t = 3, alpha = 5): add round constants, S-box all
+    three elements, apply the MDS rows `m0 m1 m2`. -/
+@[circuit_norm]
+def poseidonFullSpec (rc m0 m1 m2 s : R × R × R) : R × R × R :=
+  let t0 := (s.1 + rc.1)^5
+  let t1 := (s.2.1 + rc.2.1)^5
+  let t2 := (s.2.2 + rc.2.2)^5
+  (m0.1 * t0 + m0.2.1 * t1 + m0.2.2 * t2,
+   m1.1 * t0 + m1.2.1 * t1 + m1.2.2 * t2,
+   m2.1 * t0 + m2.2.1 * t1 + m2.2.2 * t2)
+
+/-- One Poseidon partial round: S-box only the first element. -/
+@[circuit_norm]
+def poseidonPartialSpec (rc m0 m1 m2 s : R × R × R) : R × R × R :=
+  let t0 := (s.1 + rc.1)^5
+  let t1 := s.2.1 + rc.2.1
+  let t2 := s.2.2 + rc.2.2
+  (m0.1 * t0 + m0.2.1 * t1 + m0.2.2 * t2,
+   m1.1 * t0 + m1.2.1 * t1 + m1.2.2 * t2,
+   m2.1 * t0 + m2.2.1 * t1 + m2.2.2 * t2)
+
+/-- Short-Weierstrass curve evaluation `g(x) = x^3 + A x + B`. -/
+@[circuit_norm]
+def curveEvalSpec (A B x : R) : R := x^3 + A * x + B
+
 end Specs
 
 /-- Helper: in any commutative ring, `-1 = 1` forces `2 = 0` (char 2). -/
@@ -287,6 +313,95 @@ def circuit (b3 : F) : FormalCircuit F TwoPoints fieldTriple where
 
 end RcbAdd
 
+
+/-! ## Gadget 6: Poseidon rounds (t = 3, alpha = 5) — the production hash.
+The full permutation is 8 full + 56 partial rounds of these two layers. -/
+
+namespace PoseidonRound
+
+def sbox (u : Expression F) : Circuit F (Expression F) := do
+  let a2 <== u * u
+  let a4 <== a2 * a2
+  let a5 <== a4 * u
+  return a5
+
+def mainFull (rc m0 m1 m2 : F × F × F)
+    (s : Expression F × Expression F × Expression F) :
+    Circuit F (Expression F × Expression F × Expression F) := do
+  let t0 ← sbox (s.1 + rc.1)
+  let t1 ← sbox (s.2.1 + rc.2.1)
+  let t2 ← sbox (s.2.2 + rc.2.2)
+  return (m0.1 * t0 + m0.2.1 * t1 + m0.2.2 * t2,
+          m1.1 * t0 + m1.2.1 * t1 + m1.2.2 * t2,
+          m2.1 * t0 + m2.2.1 * t1 + m2.2.2 * t2)
+
+def circuitFull (rc m0 m1 m2 : F × F × F) :
+    FormalCircuit F fieldTriple fieldTriple where
+  main := mainFull rc m0 m1 m2
+  Spec (s : F × F × F) (out : F × F × F) :=
+    out = poseidonFullSpec rc m0 m1 m2 s
+  soundness := by
+    rintro _ _ ⟨_, _, _⟩ ⟨_, _, _⟩ h_env h_assumptions h_hold
+    simp only [circuit_norm, mainFull, sbox, poseidonFullSpec] at h_env h_hold ⊢
+    rcases h_env.symm with ⟨_, _, _⟩
+    simp_all only
+    refine Prod.ext ?_ (Prod.ext ?_ ?_) <;> simp only [] <;> ring
+  completeness := by
+    simp_all only [circuit_norm, mainFull, sbox]
+
+def mainPartial (rc m0 m1 m2 : F × F × F)
+    (s : Expression F × Expression F × Expression F) :
+    Circuit F (Expression F × Expression F × Expression F) := do
+  let t0 ← sbox (s.1 + rc.1)
+  let t1 := s.2.1 + rc.2.1
+  let t2 := s.2.2 + rc.2.2
+  return (m0.1 * t0 + m0.2.1 * t1 + m0.2.2 * t2,
+          m1.1 * t0 + m1.2.1 * t1 + m1.2.2 * t2,
+          m2.1 * t0 + m2.2.1 * t1 + m2.2.2 * t2)
+
+def circuitPartial (rc m0 m1 m2 : F × F × F) :
+    FormalCircuit F fieldTriple fieldTriple where
+  main := mainPartial rc m0 m1 m2
+  Spec (s : F × F × F) (out : F × F × F) :=
+    out = poseidonPartialSpec rc m0 m1 m2 s
+  soundness := by
+    rintro _ _ ⟨_, _, _⟩ ⟨_, _, _⟩ h_env h_assumptions h_hold
+    simp only [circuit_norm, mainPartial, sbox, poseidonPartialSpec]
+      at h_env h_hold ⊢
+    rcases h_env.symm with ⟨_, _, _⟩
+    simp_all only
+    refine Prod.ext ?_ (Prod.ext ?_ ?_) <;> simp only [] <;> ring
+  completeness := by
+    simp_all only [circuit_norm, mainPartial, sbox]
+
+end PoseidonRound
+
+/-! ## Gadget 7: curve evaluation `g(x) = x^3 + Ax + B` (SWU / iso-curve layer).
+The circuit receives a precomputed square `xsq`; the assumption `xsq = x^2`
+is discharged by the preceding (verified) `SquareStep` layer. -/
+
+namespace CurveEval
+
+def main (A B : F) (input : Expression F × Expression F) :
+    Circuit F (Expression F) := do
+  let out <== input.1 * input.2 + A * input.2 + B
+  return out
+
+def circuit (A B : F) : FormalCircuit F fieldPair field where
+  main := main A B
+  Assumptions (input : F × F) := input.1 = input.2^2
+  Spec (input : F × F) (out : F) := out = curveEvalSpec A B input.2
+  soundness := by
+    rintro _ _ ⟨_, _⟩ ⟨_, _⟩ h_env h_assumptions h_hold
+    simp only [circuit_norm, main, curveEvalSpec] at h_env h_hold h_assumptions ⊢
+    rcases h_env.symm with ⟨_, _⟩
+    simp_all only
+    ring
+  completeness := by
+    simp_all only [circuit_norm, main]
+
+end CurveEval
+
 /-! ## Test vectors over the Pallas base field
 
 These pin the Lean-verified specs to the Sage implementation: the Sage
@@ -308,5 +423,14 @@ abbrev Fpal := ZMod pallasP
 #eval (qrBitSpec (-1 : Fpal) : Fpal)
 -- vector 5: RCB addition, b3 = 15, P = (1,2,1), Q = (3,4,1)
 #eval (rcbSpec (15 : Fpal) 1 2 1 3 4 1)
+
+
+-- vector 6: Poseidon full round, rc=(1,2,3), MDS rows (1,2,3),(4,5,6),(7,8,9),
+--           state (1,0,0)
+#eval (poseidonFullSpec ((1:Fpal),2,3) (1,2,3) (4,5,6) (7,8,9) (1,0,0))
+-- vector 7: Poseidon partial round, same parameters
+#eval (poseidonPartialSpec ((1:Fpal),2,3) (1,2,3) (4,5,6) (7,8,9) (1,0,0))
+-- vector 8: curve eval, A=3, B=7, x=2  ->  8+6+7 = 21
+#eval (curveEvalSpec (3 : Fpal) 7 2)
 
 end Gadgets.Genesis

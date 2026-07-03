@@ -1,6 +1,6 @@
 # Genesis — Delegated-MSM IPA with In-Circuit SRS Derivation
 
-*Successor to Atlas (`1-atlas.md`). Named for how it works: the generators are grown from a seed inside the delegated circuit — the SRS is a program, not a table. This removes Atlas's Kedlaya–Umans preprocessing, and with it the galactic constants.*
+*Successor to Atlas (`1-atlas.md`). Named for how it works: the generators are grown from a seed inside the delegated circuit — the SRS is a program, not a table. This removes Atlas's Kedlaya–Umans preprocessing, and with it the galactic constants. See `3-prism.md` for the successor that drops the in-circuit curve arithmetic entirely — trading zero-preprocessing for a near-linear transparent RS encoding, and the $10^2$–$10^3\times$ prover for an $O(n)$-smul one.*
 
 **Abstract.** Same target as Atlas: a polynomial commitment over an ordinary prime-order group with $\mathrm{polylog}(n)$ proof and *online* verifier — **no pairing, no unknown-order group, no recursion**. The single change: instead of feeding the delegated MSM circuit the $n$-sized generator table (whose input-MLE evaluation forced Atlas's $n^{1+\varepsilon}$ preprocessing), the circuit takes only the **seed** and derives the generators internally by hash-to-curve. The circuit input shrinks to $O(\log n)$ field elements, the final input-MLE check becomes trivial, and every component has implemented-system (GKR/Libra-grade) constants. Setup is: publish a seed.
 
@@ -68,6 +68,31 @@ This does not contradict the digest lower bound (`no_lossy_digest_verifier`): th
 - **The two-field problem** (the main open engineering): curve arithmetic is over $\mathbb{F}_p$, scalars/tensor over $\mathbb{F}_q$. Either (a) non-native $\mathbb{F}_q$ arithmetic emulated inside the $\mathbb{F}_p$ GKR — tens-of-$\times$ constant blowup, deterministic, simplest; or (b) a linked $\mathbb{F}_q$-sumcheck + $\mathbb{F}_p$-GKR pair joined by bit-decomposition claims — leaner but with a fiddlier soundness argument. Engineering, not a conceptual barrier; where a paper-grade version spends its pages.
 - **Composition proof:** end-to-end (BP extraction $\circ$ FS'd GKR) is not written out; wiring-MLE evaluability of the uniform circuit is standard GKR engineering, unformalized.
 - **Prover overhead** is real ($10^2$–$10^3\times$ the raw MSM) even if no longer galactic; the certificate is per-opening.
+
+
+## Implementation status (updated)
+
+The scheme is **implemented end-to-end and benchmarked**; the spec above is realized by:
+
+| artifact | contents |
+|---|---|
+| `../sage/3-genesis-e2e.sage` | full pipeline on Pallas (toy-hash derivation): layered-sumcheck GKR engine, in-circuit derivation + CT Tonelli–Shanks + RCB fold; verifier never touches the $n$ generators |
+| `../sage/4-genesis-prod.sage` | **production derivation**: Poseidon (t=3, $\alpha$=5, 8 full + 56 partial rounds) and RFC-9380-style iso-SWU hash-to-curve (3-isogeny + constants computed by Sage at load, projective dual isogeny, no retries) |
+| `../clean-circuits/Genesis.lean` | formally verified circuit gadgets ([clean](https://github.com/Verified-zkEVM/clean)): Poseidon rounds, exponent-chain steps, TS conditional step, QR bit, curve evaluation, complete RCB point addition — soundness **and** completeness proven; 8 `#eval` vectors pin Lean $\leftrightarrow$ Sage |
+
+**Measured** (Pallas, single-thread Sage, same machine, both verifiers in Sage): the Genesis
+verifier crosses the naive linear verifier at $n \approx 256$ and wins $2.2\times$ at
+$n = 512$ (production pipeline) and $5.5\times$ at $n = 2048$ (toy pipeline, where it also
+beats a pure-python-int MSM baseline $1.4\times$). Verify time grows $\sim \log n$
+($\lambda$-dominated); prover $\approx 0.2$ s/lane.
+
+**What remains unverified** (honest inventory): the Sage GKR engine (claim bookkeeping,
+kernels, folding — where the one real bug of the build lived), the composed multi-round GKR
+soundness (single-round Schwartz–Zippel is proven), Fiat–Shamir, the RCB-formulas ↔ group-law
+link (tested on 120 cases incl. identity/doubling; formal proof needs Mathlib
+`WeierstrassCurve`), the CT-TS loop invariant (endpoint identity proven), and Poseidon's
+cryptographic properties (constants are SHA-derived + Cauchy MDS rather than Grain-generated
+with subspace checks — swapping in official pasta parameters is mechanical).
 
 ## Comparison
 
