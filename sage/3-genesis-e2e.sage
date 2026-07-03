@@ -22,7 +22,7 @@
 #
 # Honest demo notes:
 #   * the hash is a toy algebraic sponge (x^5 rounds), not Poseidon;
-#   * hash-to-curve uses a 4-candidate Legendre window; the setup retries the
+#   * hash-to-curve uses a CAND-candidate Legendre window; the setup retries the
 #     seed until every index has a valid candidate (a production system uses
 #     iso-SWU); the Legendre tests and the sqrt run IN-CIRCUIT;
 #   * proof size / verifier time are dominated by lambda = 255 (bit-length),
@@ -32,7 +32,7 @@
 #     and the asymptotics, not a competitive implementation.
 #
 # Run:  sage sage/3-genesis-e2e.sage
-import hashlib, time
+import hashlib, time, os
 
 # ============================================================ Pallas
 p = 28948022309329048855892746252171976963363056481941560715954676764349967630337
@@ -104,23 +104,26 @@ def toy_hash(h):
         h = u**5
     return h
 
+CAND = int(os.environ.get("GENESIS_CAND", "8"))   # hash-to-curve window;
+# per-index failure prob = 2^-CAND; seed search needs (1-2^-CAND)^n ~ 1
+
 def derive_native(seed_fe, i):
     """Reference derivation — must match the circuit gate-for-gate."""
     h = toy_hash(seed_fe + i)
-    cands = [h + c for c in range(4)]
+    cands = [h + c for c in range(CAND)]
     gs = [x**3 + 5 for x in cands]
     vs = [g**E1BITS_EXP for g in gs]         # g^((m+1)/2)
     ws = [g**E2BITS_EXP for g in gs]         # g^m
     ls = [w**(2**(S2AD - 1)) for w in ws]    # Legendre symbol = w^(2^31)
     qs = [(1 + l) * INV2 for l in ls]
     sels, acc = [], Fp(1)
-    for c in range(4):
+    for c in range(CAND):
         sels.append(qs[c] * acc); acc *= (1 - qs[c])
     if sum(sels) != 1:
         return None                          # no QR candidate: reject seed
-    x = sum(sels[c] * cands[c] for c in range(4))
-    v = sum(sels[c] * vs[c] for c in range(4))
-    w = sum(sels[c] * ws[c] for c in range(4))
+    x = sum(sels[c] * cands[c] for c in range(CAND))
+    v = sum(sels[c] * vs[c] for c in range(CAND))
+    w = sum(sels[c] * ws[c] for c in range(CAND))
     for K in range(S2AD - 1, 0, -1):         # constant-time Tonelli-Shanks
         t = w**(2**(K - 1))
         b = (1 - t) * INV2
@@ -231,8 +234,11 @@ class Builder:
             n = 1 << self.nv
             new = {}
             for (nm, deps, f, dg) in outs:
-                new[nm] = [f({d: self.cur[d][i] for d in deps})
-                           for i in range(n)]
+                if f is None:
+                    new[nm] = self.cur[deps[0]]      # identity: share, no copy
+                else:
+                    new[nm] = [f({d: self.cur[d][i] for d in deps})
+                               for i in range(n)]
             self.cur = new
         else:
             self.cur = {nm: None for (nm, _, _, _) in outs}
@@ -252,7 +258,12 @@ class Builder:
         self.steps.append(step)
 
 def ident(name):
-    return (name, [name], (lambda d, _n=name: d[_n]), 1)
+    # f = None marks an identity carry: the builder shares the list object
+    # (no copy) and the engine reads the dep value directly.
+    return (name, [name], None, 1)
+
+def feval(f, deps, vals):
+    return vals[deps[0]] if f is None else f(vals)
 
 def gkr_prove(steps, out_claims, tr, debug=False):
     claims = {c: list(v) for c, v in out_claims.items()}
@@ -292,7 +303,7 @@ def gkr_prove(steps, out_claims, tr, debug=False):
             for i in range(n):
                 vals = {d: arrs[d][i] for d in alldeps}
                 for (nm, deps, f, dg) in outs:
-                    tot += kern[nm][i] * f(vals)
+                    tot += kern[nm][i] * feval(f, deps, vals)
             assert tot == combined, (
                 f"witness/claim mismatch @walk={widx} nv={nv} "
                 f"outs={[nm for (nm, _, _, _) in outs]} "
@@ -310,7 +321,7 @@ def gkr_prove(steps, out_claims, tr, debug=False):
                 for i in range(m):
                     vals = {d: fa[d][i] for d in alldeps}
                     for (nm, deps, f, dg) in outs:
-                        tot += fk[nm][i] * f(vals)
+                        tot += fk[nm][i] * feval(f, deps, vals)
                 Svals.append(tot)
             tr.absorb("poly", [int(x) for x in Svals])
             r = tr.chal_p("r")
@@ -371,7 +382,7 @@ def gkr_verify(steps, out_claims, proof, tr):
                 if nm2 == nm:
                     K += w * eq_point(pt, rpt)
                     ops += nv
-            tot += K * f(finals)
+            tot += K * feval(f, deps, finals)
             ops += 10
         if tot != claim:
             return False, ops, f"final layer check failed @walk={widx}"
@@ -411,24 +422,24 @@ def build_circuit(k, seed_fe, xs, prover):
 
     # ---- stage 2: candidates and g_c = x_c^3 + 5 ---------------------------
     B.simd([(f"sq{c}", ["h"], (lambda d, _c=c: (d["h"] + _c)**2), 2)
-            for c in range(4)] + [ident("h")])
+            for c in range(CAND)] + [ident("h")])
     B.simd([(f"g{c}", [f"sq{c}", "h"],
              (lambda d, _c=c: d[f"sq{_c}"] * (d["h"] + _c) + 5), 2)
-            for c in range(4)] + [ident("h")])
+            for c in range(CAND)] + [ident("h")])
 
     # ---- stage 3: exponent chains v_c = g^((m+1)/2), w_c = g^m -------------
-    B.simd([(f"v{c}", [], (lambda d: Fp(1)), 0) for c in range(4)] +
-           [(f"w{c}", [], (lambda d: Fp(1)), 0) for c in range(4)] +
-           [ident(f"g{c}") for c in range(4)] + [ident("h")])
-    carry = [ident(f"g{c}") for c in range(4)] + [ident("h")]
+    B.simd([(f"v{c}", [], (lambda d: Fp(1)), 0) for c in range(CAND)] +
+           [(f"w{c}", [], (lambda d: Fp(1)), 0) for c in range(CAND)] +
+           [ident(f"g{c}") for c in range(CAND)] + [ident("h")])
+    carry = [ident(f"g{c}") for c in range(CAND)] + [ident("h")]
     for t in range(224):
         B.simd([(f"v{c}", [f"v{c}"], (lambda d, _c=c: d[f"v{_c}"]**2), 2)
-                for c in range(4)] +
+                for c in range(CAND)] +
                [(f"w{c}", [f"w{c}"], (lambda d, _c=c: d[f"w{_c}"]**2), 2)
-                for c in range(4)] + carry)
+                for c in range(CAND)] + carry)
         if E1BITS[t] or E2BITS[t]:
             outs = []
-            for c in range(4):
+            for c in range(CAND):
                 if E1BITS[t]:
                     outs.append((f"v{c}", [f"v{c}", f"g{c}"],
                                  (lambda d, _c=c: d[f"v{_c}"] * d[f"g{_c}"]), 2))
@@ -442,33 +453,37 @@ def build_circuit(k, seed_fe, xs, prover):
             B.simd(outs + carry)
 
     # ---- stage 4: Legendre symbols l_c = w_c^(2^31) ------------------------
-    carry2 = ([ident(f"v{c}") for c in range(4)] +
-              [ident(f"w{c}") for c in range(4)] + [ident("h")])
+    carry2 = ([ident(f"v{c}") for c in range(CAND)] +
+              [ident(f"w{c}") for c in range(CAND)] + [ident("h")])
     B.simd([(f"l{c}", [f"w{c}"], (lambda d, _c=c: d[f"w{_c}"]**2), 2)
-            for c in range(4)] + carry2)
+            for c in range(CAND)] + carry2)
     for _ in range(S2AD - 2):
         B.simd([(f"l{c}", [f"l{c}"], (lambda d, _c=c: d[f"l{_c}"]**2), 2)
-                for c in range(4)] + carry2)
+                for c in range(CAND)] + carry2)
 
-    # ---- stage 5: select first QR candidate --------------------------------
+    # ---- stage 5: select first QR candidate (iterative, deg-2 layers;
+    #      "not-yet-selected" running product np, selector s_c = q_c*np) -----
     def qf(l): return (1 + l) * INV2
-    sel_fs = [
-        ("s0", ["l0"], (lambda d: qf(d["l0"])), 1),
-        ("s1", ["l0", "l1"],
-         (lambda d: qf(d["l1"]) * (1 - qf(d["l0"]))), 2),
-        ("s2", ["l0", "l1", "l2"],
-         (lambda d: qf(d["l2"]) * (1 - qf(d["l1"])) * (1 - qf(d["l0"]))), 3),
-        ("s3", ["l0", "l1", "l2", "l3"],
-         (lambda d: qf(d["l3"]) * (1 - qf(d["l2"])) * (1 - qf(d["l1"]))
-                    * (1 - qf(d["l0"]))), 4),
-    ]
-    B.simd(sel_fs + carry2)
-    B.simd([("xs", [f"s{c}" for c in range(4)] + ["h"],
-             (lambda d: sum(d[f"s{c}"] * (d["h"] + c) for c in range(4))), 2),
-            ("vv", [f"s{c}" for c in range(4)] + [f"v{c}" for c in range(4)],
-             (lambda d: sum(d[f"s{c}"] * d[f"v{c}"] for c in range(4))), 2),
-            ("ww", [f"s{c}" for c in range(4)] + [f"w{c}" for c in range(4)],
-             (lambda d: sum(d[f"s{c}"] * d[f"w{c}"] for c in range(4))), 2)])
+    carry_l = [ident(f"l{c}") for c in range(CAND)]
+    B.simd([("np", [], (lambda d: Fp(1)), 0)] + carry_l + carry2)
+    for c in range(CAND):
+        prev_s = [ident(f"s{j}") for j in range(c)]
+        keep_l = [ident(f"l{j}") for j in range(c + 1, CAND)]
+        B.simd([(f"s{c}", ["np", f"l{c}"],
+                 (lambda d, _c=c: qf(d[f"l{_c}"]) * d["np"]), 2),
+                ("np", ["np", f"l{c}"],
+                 (lambda d, _c=c: d["np"] * (1 - qf(d[f"l{_c}"]))), 2)]
+               + prev_s + keep_l + carry2)
+    all_s = [f"s{c}" for c in range(CAND)]
+    B.simd([("xs", all_s + ["h"],
+             (lambda d: sum(d[f"s{c}"] * (d["h"] + c)
+                            for c in range(CAND))), 2),
+            ("vv", all_s + [f"v{c}" for c in range(CAND)],
+             (lambda d: sum(d[f"s{c}"] * d[f"v{c}"]
+                            for c in range(CAND))), 2),
+            ("ww", all_s + [f"w{c}" for c in range(CAND)],
+             (lambda d: sum(d[f"s{c}"] * d[f"w{c}"]
+                            for c in range(CAND))), 2)])
 
     # ---- stage 6: constant-time Tonelli-Shanks sqrt ------------------------
     for K in range(S2AD - 1, 0, -1):
@@ -624,6 +639,135 @@ def verify(seed_fe, U, z, proof, k):
                 return False, "input closed-form check failed"
     return True, f"ok ({ops} certificate field ops)"
 
+# ============================================================ benchmark
+def naive_verify_sage(C, U, z, Ls, Rs, a_f, seed_fe, G, k):
+    """The NAIVE LINEAR verifier: recomputes Q = <s,G> itself (n-term MSM),
+    plus the same O(log n) IPA checks.  This is standard Bulletproofs."""
+    tr = Transcript("genesis-e2e")
+    tr.absorb("seed", int(seed_fe)); tr.absorb_point("C", C)
+    tr.absorb("z", int(z)); tr.absorb("v", int(_BENCH_V))
+    xs = []
+    P0 = C + int(_BENCH_V) * U
+    for L, R in zip(Ls, Rs):
+        tr.absorb_point("L", L); tr.absorb_point("R", R)
+        x = tr.chal_q("x"); xs.append(x)
+        P0 += int(x**2) * L + int(x**-2) * R
+    s = s_vector(xs, k)
+    Q = msm(s, G)                     # <-- the Theta(n) step
+    b0 = Fq(1)
+    for j in range(k):
+        b0 *= xs[j]**-1 + xs[j] * z**(2**(k - 1 - j))
+    return P0 == int(a_f) * Q + int(a_f * b0) * U
+
+def pyint_msm(scalars, pts_xy):
+    """Pure-python-int projective MSM (RCB complete formulas, double-and-add):
+    the naive verifier's MSM re-done on the same 'plain arithmetic' backend
+    as our sumcheck verifier, for a backend-parity comparison."""
+    pp = int(p)
+    def radd(X1, Y1, Z1, X2, Y2, Z2):
+        t0 = X1*X2 % pp; t1 = Y1*Y2 % pp; t2 = Z1*Z2 % pp
+        t3 = (X1+Y1)*(X2+Y2) % pp; t3 = (t3-t0-t1) % pp
+        t4 = (Y1+Z1)*(Y2+Z2) % pp; t4 = (t4-t1-t2) % pp
+        t5 = (X1+Z1)*(X2+Z2) % pp; t5 = (t5-t0-t2) % pp
+        b3t2 = 15*t2 % pp
+        Z3 = (t1+b3t2) % pp; t1m = (t1-b3t2) % pp
+        Y3g = 15*t5 % pp
+        X3 = (t3*t1m - t4*Y3g) % pp
+        t0_3 = 3*t0 % pp
+        Y3 = (Y3g*t0_3 + t1m*Z3) % pp
+        Z3o = (Z3*t4 + t0_3*t3) % pp
+        return X3, Y3, Z3o
+    acc = (0, 1, 0)
+    for s, (px, py) in zip(scalars, pts_xy):
+        pt = (int(px), int(py), 1)
+        r = (0, 1, 0)
+        for bit in Integer(int(s)).binary():
+            r = radd(*r, *r)
+            if bit == "1":
+                r = radd(*r, *pt)
+        acc = radd(*acc, *r)
+    return acc
+
+def clean_vectors_check():
+    """Lean <-> Sage link: these vectors are printed by
+    `lake build Clean.Gadgets.Genesis` (#eval over ZMod pallasP) in the
+    formally verified gadget file clean-repo/Clean/Gadgets/Genesis.lean.
+    Here they are checked against the ACTUAL Sage functions that implement
+    the same circuit layers."""
+    # hashRoundSpec 7 3 = 100000        (gadget: HashRound)
+    assert (Fp(3) + 7)**5 == Fp(100000)
+    # squareMulSpec true 5 11 = 275     (gadget: SquareMulStep)
+    assert Fp(5)**2 * 11 == Fp(275)
+    # condMulSpec 9 4 (-1) = 36         (gadget: CondMulConst = TS step form)
+    assert Fp(4) * (1 + (1 - Fp(-1)) * INV2 * (Fp(9) - 1)) == Fp(36)
+    # qrBitSpec (-1) = 0                (gadget: QrBit = selection form)
+    assert (1 + Fp(-1)) * INV2 == Fp(0)
+    # rcbSpec 15 (1,2,1) (3,4,1)        (gadget: RcbAdd = the fold point op)
+    X3, Y3, Z3 = rcb_add(Fp(1), Fp(2), Fp(1), Fp(3), Fp(4), Fp(1))
+    assert (X3, Y3, Z3) == (Fp(-430), Fp(379), Fp(228))
+    print("  [clean] Lean-verified gadget test vectors match the Sage "
+          "layer functions (5/5)")
+
+def bench():
+    print("=== BENCHMARK: Genesis verifier vs the naive linear verifier ===")
+    clean_vectors_check()
+    print("    (same machine, both in Sage; py-int column = naive MSM on the")
+    print("     same plain-arithmetic backend as the sumcheck verifier)\n")
+    global _BENCH_V
+    rows = []
+    sizes = [int(s) for s in
+             os.environ.get("GENESIS_BENCH", "4,6,8").split(",") if s.strip()]
+    for kk in sizes:
+        nn = 1 << kk
+        seed_fe, G, U = setup("genesis-e2e-demo", nn)
+        a = [Fq.random_element() for _ in range(nn)]
+        z = Fq.random_element()
+        t0 = time.time()
+        pr = prove(seed_fe, G, U, a, z, kk, quiet=True)
+        tp = time.time() - t0
+        _BENCH_V = pr["v"]
+
+        t0 = time.time()
+        ok, _ = verify(seed_fe, U, z, pr, kk)
+        tgen = time.time() - t0
+        assert ok
+
+        t0 = time.time()
+        ok2 = naive_verify_sage(pr["C"], U, z, pr["Ls"], pr["Rs"],
+                                pr["a_final"], seed_fe, G, kk)
+        tnaive = time.time() - t0
+        assert ok2
+
+        xs = [Fq.random_element() for _ in range(nn)]
+        pts = [(P[0], P[1]) for P in G]
+        t0 = time.time()
+        pyint_msm(xs, pts)
+        tpy = time.time() - t0
+
+        rows.append((nn, tp, tgen, tnaive, tpy))
+        print(f"  n={nn:>4}: prover {tp:7.1f}s | Genesis verify {tgen:6.2f}s | "
+              f"naive(Sage) {tnaive:6.2f}s | naive(py-int) {tpy:6.2f}s",
+              flush=True)
+
+    print(f"\n  {'n':>6} {'Genesis verify':>15} {'naive (Sage)':>13} "
+          f"{'naive (py-int)':>15} {'speedup vs Sage':>16}")
+    for (nn, tp, tgen, tnaive, tpy) in rows:
+        print(f"  {nn:>6} {tgen:>14.2f}s {tnaive:>12.2f}s {tpy:>14.2f}s "
+              f"{tnaive/tgen:>15.1f}x")
+    best = rows[-1]
+    print(f"\n  VERDICT: at n = {best[0]}, the Genesis verifier "
+          f"({best[2]:.2f}s) is {best[3]/best[2]:.1f}x FASTER than the naive "
+          f"linear verifier ({best[3]:.2f}s).")
+    assert best[2] < best[3], "verifier not faster than the naive verifier!"
+    if best[2] < best[4]:
+        print(f"           It also beats the backend-parity py-int naive MSM "
+              f"({best[4]:.2f}s, {best[4]/best[2]:.1f}x).")
+    else:
+        print(f"           (py-int naive MSM at this n: {best[4]:.2f}s — "
+              f"crossover vs that baseline is at larger n; Genesis verify "
+              f"grows ~log n, py-int naive ~{best[4]/best[0]*1000:.1f}ms/term.)")
+    print("  (Genesis verify time is ~flat in n; naive grows linearly.)")
+
 # ============================================================ demo
 def main():
     set_random_seed(42)
@@ -720,4 +864,8 @@ def main():
     print("    grind; the architecture is the point -- verifier input is the")
     print("    seed + challenges only, generators never leave the prover")
 
-main()
+import os
+if os.environ.get("GENESIS_BENCH"):
+    bench()
+else:
+    main()

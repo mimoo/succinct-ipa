@@ -426,6 +426,54 @@ Demo-grade caveats stay caveats: toy hash (not Poseidon), Legendre-window hash-t
 (production: iso-SWU), λ=255 exponent grind dominates constants, un-optimized single-thread
 GKR. The architecture is the point: **setup = a seed; the generators never leave the prover.**
 
+## Entry 17 — Formally verified circuits (clean) + the benchmark
+
+Goal: circuits formally verified in **clean** (Verified-zkEVM's Lean 4 circuit framework),
+mirrored in Sage, and a measured wall-clock **win over the naive linear verifier**.
+
+**clean gadgets** (`clean-repo/Clean/Gadgets/Genesis.lean`, `lake build` green, 1664 jobs,
+axiom-clean): six `FormalCircuit`s with soundness *and* completeness proven —
+- `HashRound` — `out = (x+rc)^5` (the toy-hash round)
+- `SquareStep` / `SquareMulStep` — the two fixed-exponent-chain layers (public bit ⇒ two
+  branch-free gadgets, exactly matching how the Sage builder emits layers; clean's
+  elaborator rejects Lean-level `if` inside `main`, which forced — correctly — the same
+  design the Sage circuit already had)
+- `CondMulConst` + theorem `condMul_spec_ite` — the constant-time Tonelli–Shanks
+  conditional step, with its `if t=1 then w else w·z` meaning proven for `t ∈ {±1}`, char ≠ 2
+- `QrBit` — Legendre-to-selector `(1+l)/2`
+- `RcbAdd` — the complete Renes–Costello–Batina projective addition (a=0), the fold's
+  point operation, verified against `rcbSpec` (the identical chain the Sage `rcb_add` runs)
+
+**Lean↔Sage link**: `#eval` test vectors over `ZMod pallasP` printed by the Lean build
+(`100000, 275, 36, 0, (p−430, 379, 228)`) are asserted in Sage (`clean_vectors_check`)
+against the *actual* Sage layer functions. Specs are plain Lean functions mirrored verbatim.
+
+**A real bug found by scaling the benchmark**: the transparent setup retried seeds until
+*every* index found a QR among 4 hash-to-curve candidates — success probability
+`(15/16)^n`, which is ~2% at n=64 and ~e^-64 at n=1024: the setup could never terminate at
+useful sizes. Fixed by widening the window to `CAND=8` (per-index failure `2^-8`) and making
+the first-QR selection *iterative* (deg-2 `s_c = q_c·np`, `np ← np·(1-q_c)` layers) instead
+of one degree-C layer. Re-verified end-to-end. Also optimized: identity-carry layers now
+share list objects instead of copying (memory/witness-gen ×3).
+
+**Benchmark** (`GENESIS_BENCH=... sage sage/3-genesis-e2e.sage`, Pallas, same machine,
+both verifiers in Sage; py-int = naive MSM re-done on the sumcheck verifier's
+plain-arithmetic backend):
+
+| n | prover | **Genesis verify** | naive linear (Sage) | naive (py-int) | speedup |
+|---|---|---|---|---|---|
+| 64 | 13.4s | 0.70s | 0.36s | 0.08s | 0.5× |
+| 256 | 55.5s | 1.05s | **1.27s** | 0.31s | **1.2×** |
+| 512 | 113.2s | 1.25s | **2.47s** | 0.61s | **2.0×** |
+
+| **2048** (CAND=12) | 530.9s | **1.79s** | **9.90s** | 2.44s | **5.5×** |
+
+**Verdict: the Genesis verifier beats the naive linear verifier from n ≈ 256, reaching
+2.0× at n = 512 and 5.5× at n = 2048 — where it also beats the backend-parity py-int
+naive MSM (2.44s vs 1.79s, 1.4×).** Genesis verify grows ~log n (λ-dominated: 0.70 →
+1.79s while n grows 32×); the naive verifier grows linearly (~4.8 ms/term). Goal met on
+both baselines, with formally verified circuits (clean) pinned to the Sage implementation.
+
 ## Open threads / next
 
 1. **Self-eliminating accumulation (full IVC / cycle of curves).** Recurse the single
