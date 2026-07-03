@@ -838,6 +838,13 @@ def bench():
         tp = time.time() - t0
         _BENCH_V = pr["v"]
 
+        # plain Bulletproofs prover baseline (commit + IPA fold, no certificate)
+        t0 = time.time()
+        _C = msm(a, G)
+        _b = [z**i for i in range(nn)]
+        ipa_prove(Transcript("plain-ipa"), G, U, a, _b)
+        tipa = time.time() - t0
+
         t0 = time.time()
         ok, _ = verify(seed_fe, U, z, pr, kk)
         tgen = time.time() - t0
@@ -855,17 +862,27 @@ def bench():
         pyint_msm(xs, pts)
         tpy = time.time() - t0
 
-        rows.append((nn, tp, tgen, tnaive, tpy))
-        print(f"  n={nn:>4}: prover {tp:7.1f}s | Genesis verify {tgen:6.2f}s | "
-              f"naive(Sage) {tnaive:6.2f}s | naive(py-int) {tpy:6.2f}s",
+        # sizes: proof (33 B/compressed point, 32 B/field elt), verifier key
+        ngrp = 2 * len(pr["Ls"]) + 1                     # L_j, R_j, C
+        nfld = (sum(sum(len(P) for P in e["polys"]) + len(e["finals"])
+                    for e in pr["gkr"] if e) + 3 + 1)    # cert + Qproj + a
+        proof_kb = (ngrp * 33 + nfld * 32) / 1024.0
+        vkey_gen_b = 32                                  # the seed
+        vkey_naive_kb = (nn + 1) * 33 / 1024.0           # generator table + U
+        rows.append((nn, tp, tipa, tgen, tnaive, tpy, proof_kb, vkey_naive_kb))
+        print(f"  n={nn:>4}: prover {tp:7.1f}s (plain IPA {tipa:5.1f}s, "
+              f"x{tp/tipa:4.1f}) | verify {tgen:5.2f}s vs naive {tnaive:6.2f}s "
+              f"| proof {proof_kb:7.1f} KB | vkey 32 B vs {vkey_naive_kb:7.1f} KB",
               flush=True)
 
-    print(f"\n  {'n':>6} {'Genesis verify':>15} {'naive (Sage)':>13} "
-          f"{'naive (py-int)':>15} {'speedup vs Sage':>16}")
-    for (nn, tp, tgen, tnaive, tpy) in rows:
-        print(f"  {nn:>6} {tgen:>14.2f}s {tnaive:>12.2f}s {tpy:>14.2f}s "
-              f"{tnaive/tgen:>15.1f}x")
-    best = rows[-1]
+    print(f"\n  {'n':>6} {'prove':>9} {'IPA-prove':>10} {'verify':>8} "
+          f"{'naive-vfy':>10} {'py-int':>8} {'speedup':>8} "
+          f"{'proof':>9} {'vkey(gen/naive)':>17}")
+    for (nn, tp, tipa, tgen, tnaive, tpy, pkb, vkb) in rows:
+        print(f"  {nn:>6} {tp:>8.1f}s {tipa:>9.1f}s {tgen:>7.2f}s "
+              f"{tnaive:>9.2f}s {tpy:>7.2f}s {tnaive/tgen:>7.1f}x "
+              f"{pkb:>7.1f}KB {'32B':>6} / {vkb:>6.1f}KB")
+    best = [(r[0], r[1], r[3], r[4], r[5]) for r in rows][-1]
     print(f"\n  VERDICT: at n = {best[0]}, the Genesis verifier "
           f"({best[2]:.2f}s) is {best[3]/best[2]:.1f}x FASTER than the naive "
           f"linear verifier ({best[3]:.2f}s).")
