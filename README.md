@@ -21,7 +21,7 @@ the fixed, public, seed-derived generators**. Three ways, in increasing practica
 | 2 | [**Genesis**](solutions/2-genesis.md) | re-derive $\mathbf{G}$ from the seed *inside* the delegated GKR circuit | spec + Lean + clean gadgets + **Sage end-to-end + benchmarks** |
 | 3 | [**Prism**](solutions/3-prism.md) | fold a Reed–Solomon encoding of $\mathbf{G}$ — group-native BaseFold ([Eagen–Gabizon 2025/1325](https://eprint.iacr.org/2025/1325)) | spec + Lean completeness core (`foldAll_eq_mleEval`) + **Sage benchmark vs linear IPA** |
 | 4 | [**Lens**](solutions/4-lens.md) | **the IPA fold *is* an FRI fold** ($x^{-1}G_{lo}+xG_{hi} = x^{-1}(G_{lo}+x^2 G_{hi})$): the codeword folds with the IPA's own challenges, roots committed before each challenge — one merged transcript | spec + Lean core (`lens_foldAll_eq_genFinal`) + **Sage implementation + benchmarks** |
-| 5 | [**Exodus**](solutions/5-exodus.md) | Genesis with **Pedersen-committed advice**: the λ-deep chains (inverse/sqrt/Legendre/double-and-add) become one-layer checks; advice openings RLC-merge into the single delegated MSM — **no FRI, no Merkle, dlog only** | spec + Lean soundness atoms (`advice_*_sound`, `advice_batch_two`) |
+| 5 | [**Exodus**](solutions/5-exodus.md) | Genesis with **setup-committed advice**: the λ-deep derivation chains become one-layer checks — **no FRI, no Merkle, dlog only** | spec + Lean atoms + **Sage v1 measured**: n=2048 verify 1.38 s (6.9×), proof 6.6 MB (−22% vs Genesis); wide-fold + Vesta pairing = next levers |
 
 All three: transparent, prime-order, **no pairing, no unknown-order group, no recursion**.
 

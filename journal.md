@@ -591,6 +591,41 @@ axiom-clean; full Lean build green (20 modules, 1426 jobs). Spec: `solutions/5-e
 Status: design + formalized atoms; the implementation (advice-column layout, multi-point
 opening batch, wide RCB layer) is Genesis-scale engineering, not yet built.
 
+## Entry 21 — Exodus v1 implemented and measured (`sage/7-exodus.sage`)
+
+Built: assertion-claim injection in the engine (assert-zero columns checked against the
+zero-MLE at fresh transcript points), advice as input-boundary columns (tv = 1/den, branch
+bit s, root y — statement-independent, computed at setup), the shallow derivation (~85
+layers replacing ~1250: Poseidon + 10 SWU/advice layers + isogeny; circuit 1755→981 layers
+at k=2), and Pedersen advice commitments at setup.
+
+**Two findings worth the build:**
+1. **The advice-opening regress is real and the spec's RLC argument alone doesn't stop it**
+   — each certificate pass regenerates advice claims at fresh points. Fixes found:
+   statement-independent advice → committed at setup (public, recomputable); opening IPA
+   **reuses the main IPA's challenges** so its terminal is the already-certified Q.
+2. **The two-field problem resurfaces at the advice opening**: advice values live in F_p
+   (circuit field) but Pedersen-over-Pallas opens in F_q — an F_p-MLE claim can't be an
+   F_q inner product. The correct completion: **commit advice over Vesta** (scalar field =
+   F_p!) with a symmetric second-curve certificate terminating via mutual challenge-reuse —
+   the Pasta cycle finally earning its keep in a non-recursive design. v1 ships with a
+   native O(n)-field-op advice check (~60ms, clearly labeled) pending the Vesta pairing.
+
+**Measured** (vs Genesis at the same sizes):
+
+| n | prove | verify | naive | speedup | proof |
+|---|---|---|---|---|---|
+| 64 | 9.1s (G 11.5) | 0.52s (G 0.66) | 0.37s | 0.7× | 2.4 MB (G 3.4) |
+| 256 | 36.0s (G 46.3) | 0.81s (G 1.00) | 1.28s | 1.6× | 3.8 MB (G 5.1) |
+| 512 | 74.9s (G 95.5) | 1.00s (G 1.20) | 2.47s | 2.5× | 4.7 MB (G 6.1) |
+| 2048 | 358.9s (G 391.4) | **1.38s** (G 1.69) | 9.49s | **6.9×** | **6.6 MB** (G 8.4) |
+
+Verify −18%, proof −22%, prover −8–20% — the derivation-slash delivered; the remaining MBs
+are the FOLD certificate (as the accounting predicted). The designed-but-unbuilt **wide
+cross-round fold restructure** (510·k → 510 layers via prefix-block indexing, public
+bit-schedule columns, wiring sumchecks) is the ~4× proof lever; with it Exodus targets
+~1.5 MB, and with GLV ~1 MB. All hash-free.
+
 ## Open threads / next
 
 1. **Self-eliminating accumulation (full IVC / cycle of curves).** Recurse the single

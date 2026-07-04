@@ -40,3 +40,15 @@ and the delegated circuit folds the combined (sum-of-tensors) coefficient vector
 - The **joint extraction** write-up (IPA extraction ∘ sumcheck ∘ batched advice openings) is the same class of paper-grade obligation as Genesis's composition caveat — all pieces are standard and share one transcript.
 - Advice-column *count* management (fold traces are ~255 columns per round) costs the verifier a short-scalar RLC over the advice commitments; small-exponent batching keeps this to a few hundred cheap scalar mults.
 - Genesis remains the zero-advice baseline; Lens/Prism remain the small-proof points **if** hash commitments are acceptable. Exodus is the small-proof point when they are not.
+
+## Implementation status (v1 measured)
+
+`../sage/7-exodus.sage`: shallow advice derivation (circuit 1755→981 layers at k=2),
+assertion injection, setup-committed advice. Measured at n=2048: verify **1.38 s** (6.9×
+vs naive; Genesis 1.69 s), proof **6.6 MB** (Genesis 8.4 MB), prover 359 s (Genesis 391 s).
+Two findings: (1) the advice-opening regress terminates only via statement-independent
+setup-committed advice + challenge reuse; (2) **the F_p/F_q two-field problem resurfaces at
+the advice opening** — the correct completion commits advice over **Vesta** (scalar field
+F_p) with a symmetric certificate; v1 uses a labeled native O(n)-field-op advice check
+(~60 ms) pending that pairing. Remaining levers to the ~300–400 KB target: the wide
+cross-round fold restructure (~4× proof) and GLV (~2×).
