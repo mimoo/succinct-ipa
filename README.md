@@ -1,157 +1,136 @@
 # succinct-ipa
 
-A Lean 4 / Mathlib scaffolding that pins down what a **succinct verifier for a
-discrete-log, IPA-style polynomial commitment** (Bulletproofs/Halo family) can and
-cannot be — and certifies one solution.
+**Can a discrete-log inner-product argument (Bulletproofs) have a succinct verifier?**
+This repo is a machine-checked investigation of that question — from Lean 4 impossibility
+lemmas, through three original constructions, to a working Sage implementation on the
+Pallas curve whose verifier **measurably beats the naive linear verifier**, with its
+circuit layers formally verified in [clean](https://github.com/Verified-zkEVM/clean).
 
-## The question
+## TL;DR
 
-Bulletproofs-style inner-product arguments have a verifier that runs `k = log₂ n`
-cheap rounds but ends in **one `n`-sized multi-scalar multiplication (MSM)**, making
-the verifier `Θ(n)` — *linear*. We want a *succinct* (`polylog n`) verifier, keeping
-the assumption discrete-log (no pairings if possible).
+The Bulletproofs verifier is linear for exactly one reason: the folded-generator MSM
+$G_0 = \langle \mathbf{s}, \mathbf{G} \rangle$. Everything else is $O(\log n)$ (proven:
+`bSuccinct_eq_bLinear`). The MSM cannot be removed in transparent prime-order dlog
+(proven "verifier-needs-help" lemmas: `no_partial_read_verifier`,
+`no_lossy_digest_verifier`) — but it can be **discharged by a prover-aided argument about
+the fixed, public, seed-derived generators**. Three ways, in increasing practicality:
 
-## The answer this repo formalizes
+| # | solution | how the generator-MLE is discharged | status |
+|---|---|---|---|
+| 1 | [**Atlas**](solutions/1-atlas.md) | GKR delegation + Kedlaya–Umans preprocessed evaluation | spec (constants galactic) |
+| 2 | [**Genesis**](solutions/2-genesis.md) | re-derive $\mathbf{G}$ from the seed *inside* the delegated GKR circuit | spec + Lean + clean gadgets + **Sage end-to-end + benchmarks** |
+| 3 | [**Prism**](solutions/3-prism.md) | fold a Reed–Solomon encoding of $\mathbf{G}$ — group-native BaseFold ([Eagen–Gabizon 2025/1325](https://eprint.iacr.org/2025/1325)) | spec + Lean completeness core (`foldAll_eq_mleEval`) + **Sage benchmark vs linear IPA** |
+| 4 | [**Lens**](solutions/4-lens.md) | **the IPA fold *is* an FRI fold** ($x^{-1}G_{lo}+xG_{hi} = x^{-1}(G_{lo}+x^2 G_{hi})$): the codeword folds with the IPA's own challenges, roots committed before each challenge — one merged transcript | spec + Lean core (`lens_foldAll_eq_genFinal`) + **Sage implementation + benchmarks** |
+| 5 | [**Exodus**](solutions/5-exodus.md) | Genesis with **Pedersen-committed advice**: the λ-deep chains (inverse/sqrt/Legendre/double-and-add) become one-layer checks; advice openings RLC-merge into the single delegated MSM — **no FRI, no Merkle, dlog only** | spec + Lean soundness atoms (`advice_*_sound`, `advice_batch_two`) |
 
-The verifier's final check is
+All three: transparent, prime-order, **no pairing, no unknown-order group, no recursion**.
 
-    P₀ = a·G₀ + (a·b₀)·U                                     (★)
+## Asymptotic comparison
 
-with `G₀ = ⟨s, G⟩` (folded generators) and `b₀ = ⟨s, (z⁰,…,z^{n-1})⟩` (folded eval
-scalar), where the scalar vector `s` is built from the round challenges `x₁…x_k`:
-`sᵢ = Πⱼ xⱼ^{±1}` per the bits of `i`. Two facts decide succinctness:
+$n$ = vector size, $\lambda$ = 255 (field bits), sizes in group/field elements unless noted.
 
-1. **`b₀` is already succinct.** `s` is the coefficient vector of
-   `g(X) = Πⱼ (xⱼ⁻¹ + xⱼ·X^{2^{j-1}})`, so `b₀ = g(z)` is an `O(k)` product even
-   though `s` has `n` entries. **This is proven** as `bSuccinct_eq_bLinear`.
+| scheme | verifier key / setup | commit | proof | verifier (online) | prover | assumption | recursion |
+|---|---|---|---|---|---|---|---|
+| Bulletproofs | $n$ points (or re-derive, $O(n)$) | 1 | $2\log n$ | $\Theta(n)$ smul | $O(n)$ smul | dlog | no |
+| Hyrax | $n$ points | $\sqrt n$ | $O(\sqrt n)$ | $O(\sqrt n)$ | $O(n)$ | dlog | no |
+| Dory | $O(n)$ pairing pre-processing (transparent) | 1 | $O(\log n)$ | $O(\log n)$ pairings | $O(n)$ | SXDH (pairing) | no |
+| DARK | $O(1)$ | 1 | $O(\log n)$ | polylog | $O(n)$ heavy ops | unknown-order group | no |
+| Halo / Nova | $O(1)$ | 1 | $O(\log n)$ | $O(1)$/step + one $\Theta(n)$ decider | ~2 MSM/step | dlog | **yes** |
+| **Atlas** | $n^{1+\varepsilon}$ table (galactic) | 1 | polylog | polylog | $O(n\lambda)$ | dlog | no |
+| **Genesis** | **32 B (a seed)** | 1 | $O(\lambda \log^2 n)$ field elts | $O(\lambda \log n)$ field ops | $O(n\lambda)$ (GKR, no FFT/commitments) | dlog | no |
+| **Prism** | $\tilde O(n)$ RS-encode + Merkle root (transparent) | 1 | $O(\lambda \log^2 n)$ hashes | $O(\lambda \log n)$ smul + $O(\lambda\log^2 n)$ hash | $O(n)$ smul | dlog (+ROM) | no |
+| **Lens** | same as Prism (**64 B vkey**) | 1 | $O(\lambda \log^2 n)$ hashes, **no extra rounds** (merged into IPA) | $O(\lambda \log n)$ smul + $O(\lambda\log^2 n)$ hash | **~2× plain IPA** | dlog (+ROM) | no |
+| **Exodus** | 32 B (a seed) | 1 | est. **~300–400 KB** field elts + Pedersen points (**no hashes**) | est. ~2–4k sumcheck rounds (3–5× faster than Genesis) | est. ~2–3× plain IPA | dlog | no |
 
-2. **`G₀ = ⟨s, G⟩` is *not* succinct** for unstructured generators — that's a genuine
-   `Θ(n)` MSM (and matches the linear lower bound for commitments to unstructured
-   generators). So a succinct verifier must obtain `G₀` another way.
+The one provably-empty cell (`LowerBound.lean`): a verifier that sees the generators only
+through a **lossy linear digest** and takes no prover help cannot be sublinear. Every
+construction above is an escape the lemmas themselves name: prover help, structure, or
+recursion.
 
-We make "another way" an explicit object — a `GenOracle` carrying a claimed `G₀` plus
-a `certifies` proof — instead of hiding it. Then:
+## Measured (Genesis, production pipeline, Pallas, single-thread Sage)
 
-> **`succinct_correct`** : given a correct `GenOracle`, the succinct verifier
-> (`SuccinctAccept`, all `O(log n)` work) accepts a transcript **iff** the linear
-> reference verifier (`LinearAccept`) does.
+`sage/4-genesis-prod.sage` — Poseidon hash (t=3, α=5, 8 full + 56 partial rounds),
+RFC-9380-style iso-SWU hash-to-curve (3-isogeny + constants computed by Sage at load),
+CT Tonelli–Shanks and all curve arithmetic in-circuit, certified by a layered-sumcheck GKR.
+The verifier's input is **the seed and the challenges** — it never touches the $n$ generators.
 
-So "find a succinct dlog IPA verifier" reduces, provably, to "discharge the
-`GenOracle`." Two ways to do that (discussed in `Protocol.lean`):
+| $n$ | prove | plain IPA prove | overhead | **verify** | naive verify | **speedup** | proof size | vkey (ours / naive) |
+|---|---|---|---|---|---|---|---|---|
+| 64 | 11.5 s | 1.6 s | 7.4× | 0.66 s | 0.37 s | 0.6× | 3.4 MB | 32 B / 2.1 KB |
+| 256 | 46.3 s | 6.2 s | 7.5× | 1.00 s | 1.27 s | **1.3×** | 5.1 MB | 32 B / 8.3 KB |
+| 512 | 95.5 s | 12.2 s | 7.8× | 1.20 s | 2.51 s | **2.1×** | 6.1 MB | 32 B / 16.5 KB |
+| 2048 | 391.4 s | 49.6 s | 7.9× | **1.69 s** | 9.74 s | **5.8×** | 8.4 MB | 32 B / 66 KB |
 
-- **Accumulation / recursion (Halo-style)** — transparent, still plain dlog: defer
-  `G₀`, fold the claim into an accumulator, pay the single linear MSM *once* per batch
-  of `m` proofs → amortized `O(log n + n/m)` verifier.
-- **Structured SRS** `Gᵢ = [τⁱ]` — then `⟨s,G⟩ = [g(τ)] = [bSuccinct x τ]`, one
-  opening check → truly succinct, but needs trusted/updatable setup + pairings (leaves
-  "plain dlog").
+- **Verify time is ~flat in $n$** ($\lambda$-dominated); the naive verifier grows linearly.
+  Crossover at $n \approx 256$; at $n = 2048$ Genesis also beats a pure-python-int MSM
+  baseline on the same arithmetic backend (2.53 s, 1.5×).
+- **Prover overhead is ~8× the plain Bulletproofs prover** in this setting (both in Sage;
+  on an optimized EC backend the plain prover speeds up more than the certificate does, so
+  expect a larger ratio there).
+- **Proof size is the honest cost**: megabytes of certificate field elements
+  ($O(\lambda\log^2 n)$, unoptimized). Prism trades exactly this axis: smaller
+  constants via hashes instead of per-layer round polynomials.
+- Run it: `GENESIS_BENCH="6,8,9,11" sage sage/4-genesis-prod.sage`
+  (no env var → end-to-end demo with tamper tests).
 
-The honest conclusion the formalization encodes: dlog IPA has **no transparent,
-non-interactive, non-recursive** succinct verifier; recursion amortizes it, structure
-buys it outright. The dividing line is exactly the `GenOracle.certifies` hypothesis.
+## Measured (Lens, Pallas, single-thread Sage; rate-1/2 codeword, 20 demo queries)
 
-## Layout
+`sage/6-lens.sage` — the small-proof/small-verifier point between Genesis and Prism:
 
-| File | Contents |
-|------|----------|
-| `SuccinctIPA/Basic.lean`       | Group-as-`F`-module setting; `dot`, `msm`, `pedersen`. |
-| `SuccinctIPA/SVector.lean`     | `sCoeff`, `bSuccinct`/`bLinear`, and the proof `bSuccinct_eq_bLinear`. |
-| `SuccinctIPA/Protocol.lean`    | `LinearAccept`, `GenOracle`, `SuccinctAccept`, `succinct_correct`. |
-| `SuccinctIPA/Soundness.lean`     | Binding, the Schnorr extractor, the oracle-necessity forgery, soundness transfer. |
-| `SuccinctIPA/Experiments.lean`   | Creative attempts to kill the linear MSM, as proven identities. |
-| `SuccinctIPA/Accumulation.lean`  | Halo-style fold: O(1)-per-step deferral, proven complete + knowledge-sound. |
-| `SuccinctIPA/Hyrax.lean`         | √n verifier: rank-1 tensor split of the MSM (transparent, prime-order). |
-| `SuccinctIPA/DARK.lean`          | Evaluation-as-division: O(1)-verifier check via unknown-order encoding. |
-| `SuccinctIPA/DlogLayer.lean`     | Beneath the group: MSM = hidden inner product; structured⇔succinct⇔trapdoor. |
+| $n$ | setup (once) | prove | vs plain IPA | **verify** | naive verify | **speedup** | **proof** |
+|---|---|---|---|---|---|---|---|
+| 64 | 3.0 s | 3.2 s | 2.1× | 1.65 s | 0.37 s | 0.2× | **49.9 KB** |
+| 256 | 8.5 s | 12.8 s | 2.1× | 2.16 s | 1.27 s | 0.6× | **76.4 KB** |
+| 2048 | 98.9 s | 103.1 s | 2.1× | **3.01 s** | 9.78 s | **3.2×** | **125.7 KB** |
 
-## Soundness (`Soundness.lean`)
+Versus Genesis at $n=2048$: **proof 67× smaller** (126 KB vs 8.4 MB), **prover ~4× lighter**
+(2.1× plain IPA vs ~8×); the trade is a verifier that does group ops instead of field ops
+(686 smuls vs Genesis's field-only walk), so Genesis still wins wall-clock verification at
+small $n$ while Lens wins both proof size and verifier from $n \gtrsim 1024$. With
+production-grade $\lambda \approx 80$ queries, multiply Lens's verifier/proof by ~4 — the
+crossover moves out accordingly.
 
-Completeness says the honest transcript is accepted; soundness rules out cheating.
+## Repository layout
 
-- **`pedersen_binding`** — under the discrete-log relation assumption (`NoDLogRelation`),
-  the Pedersen commitment is injective. (Binding *is* the dlog-relation assumption.)
-- **`schnorr_extract`** — the canonical special-soundness extractor, proven in full: two
-  accepting transcripts with distinct challenges yield the witness. IPA's extractor is its
-  `k`-fold recursion (interface `IPAExtractor`).
-- **`oracle_necessary`** — a formal **forgery**: drop `GenOracle.certifies` and the succinct
-  verifier accepts statements with no witness that the linear verifier rejects. The oracle
-  is not optional.
-- **`soundness_transfer`** — *with* a sound oracle, every soundness guarantee of the linear
-  verifier transfers to the succinct one verbatim.
+| path | contents |
+|---|---|
+| `SuccinctIPA/` | Lean 4 + Mathlib theory (17 modules, no `sorry`): the $b_0$ identity, oracle framing, soundness atoms, the experiments ("conservation of linear work"), Hyrax/Dory/DARK/Nova cores, lower bounds, Genesis gate lemmas, Prism fold-=-MLE core |
+| `solutions/` | the three construction specs (markdown + LaTeX) |
+| `sage/` | executable demos: `2-genesis.sage` (oracle demo, secp256k1), `3-genesis-e2e.sage` (full pipeline, toy hash), `4-genesis-prod.sage` (**production**: Poseidon + iso-SWU + benchmarks), `5-prism.sage` (**Prism**: group FRI over Pallas, decide vs the linear IPA verifier + soundness tamper tests), `6-lens.sage` (**Lens**: merged IPA/FRI transcript, benchmarks + tamper tests) |
+| `clean-circuits/` | formally verified circuit gadgets for clean (soundness **and** completeness proven): Poseidon rounds, exponent-chain steps, TS conditional, QR bit, curve eval, complete RCB point addition; `build.sh` clones clean and builds |
+| `journal.md` | the full lab notebook: 18 entries from first diagnosis to production benchmark, including dead ends and bugs found |
 
-## Experiments (`Experiments.lean`) — can we still beat the linear MSM?
-
-Each idea is reduced to a Lean identity; the proof assistant reports whether the `Θ(n)`
-cost actually vanishes or merely relocates.
-
-- **`sCoeff_eq_prod_ite`** — `s` is a rank-1 tensor `⊗ⱼ(xⱼ⁻¹,xⱼ)`; folding contracts it
-  mode-by-mode, total `Θ(n)`. Why folding is intrinsic.
-- **`genFinal_eq_mle`** — **the MSM is a multilinear evaluation**: `G₀ = (∏ⱼxⱼ⁻¹)·MLE_G(x²)`,
-  with the *public* generators as coefficients. The door to sumcheck/tensor PCS.
-- **`mleG_is_msm` + `mleG_add`** — …but that evaluation is *again* an `msm` over the
-  generators. **Conservation of linear work**: sumcheck relocates the cost, never removes it.
-- **`batch_amortization`** — the one genuine win under plain transparent dlog: `m` proofs
-  share a single `Θ(n)` MSM (combined coefficient vector), so the per-proof verifier is
-  `O(log n + n/m) → O(log n)`. This is the Halo amortization, proven.
-
-The two real escapes leave a footprint in the assumptions (pairings/structured SRS, or
-unknown-order groups), discussed in the file's closing notes.
-
-## Making it happen — two constructions that actually work
-
-The conservation result rules out *prime-order, transparent, non-recursive* succinctness.
-Both standard escapes are constructed and proven here.
-
-### Route 1 — accumulation (`Accumulation.lean`), prime-order, transparent
-
-Defer the linear MSM into an `MSMClaim` and **fold** claims with a random challenge.
-
-- **`MSMClaim.fold`** combines claimed values as `Q₁ + α•Q₂` — no `gens`, no MSM:
-  **O(1) group ops per step**.
-- **`fold_valid`** — completeness: folding valid claims stays valid.
-- **`fold_sound`** — knowledge soundness: a fold valid at two distinct challenges forces
-  *both* inputs valid (Schnorr-style extraction).
-
-So `m` proofs ⇒ `m` succinct folds into one accumulator + **one** `Θ(n)` decider, ever.
-This is what Halo2 does: the per-step verifier is succinct.
-
-### Route 1b — Hyrax (`Hyrax.lean`), prime-order, transparent, non-recursive, `O(√n)`
-
-The most direct "succinct (non-linear)" answer with **no** recursion / pairing / setup.
-Reshape the `n` generators into a `√n × √n` grid; the IPA challenge vector is a full tensor,
-so it factors rank-1 over any split (`sCoeff_factors`).
-
-- **`msm_product_split`** — `⟨a⊗b, G⟩ = ⟨a, R⟩` with row commitments `R_i = ⟨b, gens(i,·)⟩`.
-  The prover sends the `√n` rows; the verifier does only the `√n`-term outer MSM. **`O(√n)`
-  verifier, transparent, prime-order.** Iterating the split is the Bulletproofs structure;
-  *send* vs *fold* the rows is the commitment-size ↔ verifier-time dial.
-
-### Route 2 — evaluation-as-division / DARK (`DARK.lean`), unknown-order, transparent
-
-Encode the whole polynomial in one generator's exponent, `C = p(q)•g`, so evaluation
-becomes division.
-
-- **`dark_eval_check`** — completeness: a single witness `W` satisfies the one-line check
-  `C − y•g = (q−z)•W`; the verifier does **O(1) group ops, independent of `n = deg p`**.
-  Proof is the factor theorem `(q−z) ∣ p(q)−p(z)`.
-- **`dark_witness_rigid`** — witnesses agree up to `(q−z)`-torsion; an unknown-order group
-  (no small-order elements) pins `W`. This is a *truly* succinct, transparent,
-  non-recursive verifier — bought by leaving prime-order dlog for hidden-order assumptions.
-
-## Status
-
-`lake build` succeeds (1281 jobs). `#print axioms` on every headline result —
-`bSuccinct_eq_bLinear`, `succinct_correct`, `pedersen_binding`, `schnorr_extract`,
-`oracle_necessary`, `soundness_transfer`, `genFinal_eq_mle`, `batch_amortization`,
-`MSMClaim.fold_valid`, `MSMClaim.fold_sound`, `dark_eval_check`, `dark_witness_rigid` —
-reports only `[propext, Classical.choice, Quot.sound]` (several use fewer; `dark_witness_rigid`
-needs only `propext`). **No `sorry`, no extra axioms.** Discrete-log *hardness* enters only
-as explicit hypotheses (`NoDLogRelation`, the unknown-order pinning); the multi-round IPA
-forking is exposed as the `IPAExtractor` interface rather than re-derived.
-
-## Build
+## Build & run
 
 ```sh
-lake exe cache get   # prebuilt Mathlib oleans (Mathlib pinned to v4.31.0)
-lake build
+# Lean theory (Mathlib pinned; ~5 min first time)
+lake exe cache get && lake build
+
+# clean-verified circuit gadgets
+./clean-circuits/build.sh
+
+# end-to-end demo (accept + tamper rejections), then benchmarks
+sage sage/4-genesis-prod.sage
+GENESIS_BENCH="6,8,9" sage sage/4-genesis-prod.sage
 ```
+
+## Verification status (honest)
+
+**Machine-checked** — the Lean theory (axioms only `propext/Classical.choice/Quot.sound`),
+the clean gadgets (soundness + completeness; 8 `#eval` vectors pin Lean ↔ Sage), the
+single-round sumcheck math, and the Genesis/Prism reduction cores.
+
+**Not verified** — the Sage GKR engine internals (where the one real bug of this project
+lived), the composed multi-round GKR soundness, Fiat–Shamir, the RCB-formulas ↔ group-law
+link (tested on 120 cases), Poseidon parameter quality (SHA-derived constants + Cauchy MDS;
+swap in Grain-generated pasta parameters for production), and Prism's proximity soundness
+(cited to 2025/1325, Lemma 7.2 / Thm 7.3).
+
+## Where the theory lives
+
+The journey and the proofs: `journal.md`. Highlights — `bSuccinct_eq_bLinear` ($b_0$ is
+log-time), `genFinal_eq_mle` (the MSM *is* a multilinear evaluation of the public
+generators), `mleG_is_msm` (conservation of linear work), `no_lossy_digest_verifier` (the
+wall), `genesis_reduction` + gate lemmas (Genesis), `foldAll_eq_mleEval` (Prism),
+`lens_fold_factor` + `lens_foldAll_eq_genFinal` (Lens: the IPA fold *is* an FRI fold), and
+the Hyrax/Dory/DARK/Halo/Nova cores that map the rest of the design space.

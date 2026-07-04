@@ -26,3 +26,5 @@ import SuccinctIPA.Nova
 import SuccinctIPA.Delegation
 import SuccinctIPA.Genesis
 import SuccinctIPA.Prism
+import SuccinctIPA.Lens
+import SuccinctIPA.Exodus

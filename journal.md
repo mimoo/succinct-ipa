@@ -511,6 +511,86 @@ Same crossover shape as the toy pipeline (win from n ≈ 256), now with a produc
 derivation — and at n=2048 the production verifier (1.72s) also beats the backend-parity
 py-int naive MSM (2.46s, 1.4×), with all 8 Lean-verified vectors pinning the circuits.
 
+**Extended bench** (with sizes + plain-Bulletproofs-prover baseline; canonical table now in
+`README.md`): prover overhead is **~7.5–8× the plain IPA prover** (both in Sage); proof
+size 3.4–8.4 MB of certificate field elements (O(λ·log²n), the honest cost axis Prism
+targets); verifier key **32 B (the seed)** vs the naive verifier's n·33 B generator table.
+
+**Entry 18b — Prism lands in Lean.** `SuccinctIPA/Prism.lean` (solution 3,
+`solutions/3-prism.md`): the group-native BaseFold core — `foldStep`/`foldAll`,
+`eqW_cons`, and **`foldAll_eq_mleEval`** (repeated FRI-style folding = multilinear
+evaluation of the generator codeword), plus `prism_reduction` and `mleEval_eq_msm`
+(conservation still holds; succinctness comes from checking the fold against a Merkle-
+committed codeword, the "prover help + nonlinear digest" escape the lower bound permits).
+Three proof holes fixed (dead tactics after a self-closing `congr`, `Subsingleton.elim` →
+`funext elim0` in the base case, and a flipped `show`); full Lean build green (1419 jobs),
+axiom-clean. README rewritten as the canonical map: solutions, asymptotic comparison table,
+measured benchmarks.
+
+## Entry 19 — **Lens**: the IPA fold *is* an FRI fold (`solutions/4-lens.md`)
+
+Goal: something between Genesis (fat proof, field-op verifier) and Prism (extra
+reduce/decide phases) — small proof AND small verifier — with the user's hint: *use the IPA
+folding itself to help prove the linear part*. The unlock was already in our theorems:
+
+> `genFinal_eq_mle`: G₀ = (∏xⱼ⁻¹)·MLE_G(x²) — and per round,
+> **x⁻¹·G_lo + x·G_hi = x⁻¹·(G_lo + x²·G_hi)**: the IPA generator fold IS an FRI fold by
+> challenge x², times a public scalar.
+
+So the prover Merkle-commits an RS encoding of **G** (bit-reversed so round-1's IPA split is
+the first folded variable) and folds it **with the IPA's own challenges**, committing each
+level's root *before* the next challenge — proper commit-then-challenge order, which also
+closes the ordering gap flagged as a stand-in in `5-prism.sage`'s decide (its fold challenges
+were the IPA's x² but the roots weren't in the transcript before the challenges). One merged
+transcript; no circuit; no separate decide rounds.
+
+**Lean** (`SuccinctIPA/Lens.lean`, first-attempt build, axiom-clean): `lens_fold_factor`
+(round identity), `friFoldAll_eq_monomialEval` (folding = monomial-basis MLE),
+`lens_foldAll_eq_genFinal` (collapsed codeword = folded generator), `lens_reduction`.
+Full project: 19 modules, 1420 jobs, no `sorry`.
+
+**Sage** (`sage/6-lens.sage`, first-run pass incl. tamper rejects; in-prover assert checks
+the Lean identity numerically):
+
+| n | setup(once) | prove | vs plain IPA | verify | naive | speedup | proof |
+|---|---|---|---|---|---|---|---|
+| 64 | 3.0s | 3.2s | 2.1× | 1.65s | 0.37s | 0.2× | 49.9 KB |
+| 256 | 8.5s | 12.8s | 2.1× | 2.16s | 1.27s | 0.6× | 76.4 KB |
+| 2048 | 98.9s | 103.1s | 2.1× | **3.01s** | 9.78s | **3.2×** | **125.7 KB** |
+
+vs Genesis @2048: **proof 67× smaller, prover ~4× lighter**; trade: verifier does group ops
+(686 smuls) instead of field ops, so Genesis wins verification wall-clock at small n, Lens
+wins proof size everywhere and the verifier from n ≳ 1024. Honest caveats: 20 demo queries
+(~2^-20; production ~80-100 multiplies verifier/proof ~4×); the joint IPA+FRI extraction
+argument (shared challenges) is the paper-grade obligation — analogous to but smaller than
+Genesis's unwritten composition, since both halves analyze the *same* transcript.
+
+## Entry 20 — **Exodus**: no FRI, no hashes — Genesis's proof size fixed with advice
+
+Constraint hardened again: no FRI, no hash-based commitments. First, the reframe: **Genesis
+already satisfies the letter of this** — its certificate is an information-theoretic
+sumcheck; SHA appears only as Fiat–Shamir (which Bulletproofs itself needs). Its real
+problem is the megabyte proof / ~8× prover, and both have one cause: the λ-deep chains
+(inversion ~380 layers, Legendre ~380, CT-TS ~1200, double-and-add ~510/round).
+
+**Exodus** deletes the chains with nondeterministic advice, made hash-free by committing
+advice vectors with **Pedersen over the same basis G**:
+- inversion → one check `t·d = 1` (`advice_inverse_sound`)
+- sqrt → one check `y² = g`, ± freedom harmless by the binding argument
+  (`advice_sqrt_sound`)
+- Legendre/branch → boolean `s` + fused `y² = s·g₁ + (1−s)·g₂` (`advice_branch_sound`)
+- double-and-add → the trace as advice columns, checked by ONE wide parallel deg-4 layer
+
+Why the advice commitment doesn't recurse (the crux): every advice-opening IPA's terminal
+MSM is a tensor over the same G, and all terminals RLC-merge into the ONE delegated claim
+(`advice_batch_two`, i.e. `batch_amortization`; soundness converse `fold_sound`). The
+circuit shrinks ~7000 → ~100 wide shallow layers; estimated proof ~300–400 KB (vs 8.4 MB),
+verifier ~2–4k rounds (vs 45k), prover ~2–3× plain IPA. All four soundness atoms proven,
+axiom-clean; full Lean build green (20 modules, 1426 jobs). Spec: `solutions/5-exodus.md`.
+
+Status: design + formalized atoms; the implementation (advice-column layout, multi-point
+opening batch, wide RCB layer) is Genesis-scale engineering, not yet built.
+
 ## Open threads / next
 
 1. **Self-eliminating accumulation (full IVC / cycle of curves).** Recurse the single
